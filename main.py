@@ -14,7 +14,7 @@ STATE_FILE = "state.json"
 
 # ===== إعدادات =====
 MAX_ITEMS = 8
-MAX_AGE_DAYS = 30   # استبعاد الأخبار القديمة
+MAX_AGE_DAYS = 90   # استبعاد الأخبار القديمة
 
 COUNTRY_KEYS = {
     "saudi arabia": "المملكة العربية السعودية",
