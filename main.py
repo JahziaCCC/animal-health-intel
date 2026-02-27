@@ -1,5 +1,6 @@
 import os, re, json, hashlib, datetime
 import requests
+import xml.etree.ElementTree as ET
 
 BOT = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -8,8 +9,7 @@ KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "state.json"
 
 # ===== إعدادات =====
-TIMESPAN = "12h"         # آخر 12 ساعة (تقدر تخليها 1d)
-MAX_ITEMS = 12           # كم خبر بالتقرير
+MAX_ITEMS = 12   # أقصى عدد عناصر في كل تقرير
 
 COUNTRY_KEYS = {
     "saudi arabia": "المملكة العربية السعودية",
@@ -20,7 +20,6 @@ COUNTRY_KEYS = {
     "jordan": "الأردن",
 }
 
-# كلمات للأمراض الحيوانية (إنجليزي لأن الأخبار غالباً كذا)
 DISEASE_KEYS = {
     "peste des petits ruminants": "طاعون المجترات الصغيرة (PPR)",
     "ppr": "طاعون المجترات الصغيرة (PPR)",
@@ -35,7 +34,6 @@ DISEASE_KEYS = {
     "rabies": "داء الكلب",
 }
 
-# مناطق (قاموس + fallback)
 REGION_AR = {
     # KSA
     "riyadh": "الرياض",
@@ -84,6 +82,10 @@ REGION_AR = {
     "aqaba": "العقبة",
 }
 
+# Google News RSS template
+# ملاحظة: نستخدم EN عشان كشف الكلمات أسهل + النتائج أغزر
+GOOGLE_RSS = "https://news.google.com/rss/search?q={q}&hl=en&gl=US&ceid=US:en"
+
 def now_ksa_str():
     return datetime.datetime.now(tz=KSA_TZ).strftime("%Y-%m-%d %H:%M") + " بتوقيت السعودية"
 
@@ -103,7 +105,7 @@ def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-def sid(url: str, title: str):
+def make_sid(url: str, title: str) -> str:
     raw = (url or "") + "|" + (title or "")
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -121,115 +123,105 @@ def detect_disease(text: str):
             return ar
     return None
 
-def extract_region(text: str):
-    """
-    يحاول يلقط منطقة من العنوان مثل (CENTRAL DARFUR) أو كلمات داخل النص.
-    """
+def detect_region(text: str):
     low = (text or "").lower()
-
-    # 1) أي شيء بين أقواس
-    m = re.findall(r"\(([^)]+)\)", text or "")
-    candidates = [c.strip() for c in m if c.strip()]
-
-    # 2) أو حاول يطابق من القاموس مباشرة من النص
     for k, ar in REGION_AR.items():
         if k in low:
             return ar
-
-    # 3) لو فيه أقواس جرّب ترجمتها
-    for c in candidates:
-        key = c.lower().strip()
-        if key in REGION_AR:
-            return REGION_AR[key]
-
     return "غير محدد"
 
-def gdelt_query_url():
-    # نص بحث: أمراض + مواشي + دولك
-    diseases = "(" + " OR ".join([f'"{k}"' for k in ["ppr","rift valley","foot and mouth","avian influenza","lumpy skin","anthrax","rabies"]]) + ")"
-    animals = '("livestock" OR cattle OR sheep OR goat OR camels OR poultry OR "animal disease")'
-    countries = "(" + " OR ".join([f'"{c}"' for c in ["Saudi Arabia","Sudan","Somalia","Ethiopia","Djibouti","Jordan"]]) + ")"
-    q = f"{diseases} AND {animals} AND {countries}"
-
-    # GDELT DOC API
-    return (
-        "https://api.gdeltproject.org/api/v2/doc/doc"
-        f"?query={requests.utils.quote(q)}"
-        f"&mode=artlist&format=json&sort=datedesc&maxrecords=250&timespan={TIMESPAN}"
-    )
+def fetch_google_rss(query: str):
+    url = GOOGLE_RSS.format(q=requests.utils.quote(query))
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; AnimalHealthIntel/1.0)"}
+    r = requests.get(url, timeout=45, headers=headers)
+    r.raise_for_status()
+    root = ET.fromstring(r.text)
+    items = []
+    for it in root.findall(".//item"):
+        title = (it.findtext("title") or "").strip()
+        link = (it.findtext("link") or "").strip()
+        pub = (it.findtext("pubDate") or "").strip()
+        desc = (it.findtext("description") or "").strip()
+        items.append({"title": title, "link": link, "pubDate": pub, "desc": desc})
+    return items
 
 def main():
     state = load_state()
 
+    # نبني 3-4 استعلامات فقط (عشان ما نكثر على Google)
+    queries = [
+        # أخبار عن الأمراض + مواشي + الدول
+        '("PPR" OR "peste des petits ruminants" OR "rift valley fever" OR "foot and mouth disease" OR "avian influenza" OR "lumpy skin disease") (livestock OR cattle OR sheep OR goats) (Saudi Arabia OR Sudan OR Somalia OR Ethiopia OR Djibouti OR Jordan)',
+        # استعلام مركز على PPR في دول التوريد
+        '("peste des petits ruminants" OR PPR) (Sudan OR Somalia OR Ethiopia OR Djibouti)',
+        # استعلام مركز على RVF و FMD
+        '("rift valley fever" OR RVF OR "foot and mouth disease" OR FMD) (Sudan OR Somalia OR Ethiopia OR Saudi Arabia)',
+    ]
+
+    all_items = []
     try:
-        url = gdelt_query_url()
-        r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0 (compatible; KSA-Animal-Health-Monitor/1.0)"})
-        r.raise_for_status()
-        data = r.json()
+        for q in queries:
+            all_items.extend(fetch_google_rss(q))
+    except requests.HTTPError as e:
+        status = getattr(e.response, "status_code", "غير معروف")
+        tg_send(f"⚠️ تعذر جلب RSS من Google News حالياً.\n🕒 {now_ksa_str()}\nرمز الخطأ: {status}")
+        return
     except Exception as e:
         tg_send(f"⚠️ تعذر جلب الأخبار حالياً.\n🕒 {now_ksa_str()}\nالسبب: {type(e).__name__}")
         return
 
-    arts = data.get("articles", []) or []
-    new_items = []
-
-    for a in arts:
-        title = (a.get("title") or "").strip()
-        link = (a.get("url") or "").strip()
-        if not title or not link:
+    new_events = []
+    for it in all_items:
+        title = it["title"]
+        link = it["link"]
+        blob = f"{title} {it.get('desc','')}"
+        country = detect_country(blob)
+        disease = detect_disease(blob)
+        if not country or not disease:
             continue
 
-        blob = f"{title} {a.get('sourceCountry','')} {a.get('domain','')}"
-        country_ar = detect_country(blob)
-        disease_ar = detect_disease(blob)
-        if not country_ar or not disease_ar:
+        region = detect_region(blob)
+        sid = make_sid(link, title)
+        if sid in state["seen"]:
             continue
 
-        region_ar = extract_region(title)
-
-        k = sid(link, title)
-        if k in state["seen"]:
-            continue
-
-        state["seen"][k] = {"first_seen": now_ksa_str()}
-        new_items.append({
-            "disease": disease_ar,
-            "country": country_ar,
-            "region": region_ar,
+        state["seen"][sid] = {"first_seen": now_ksa_str()}
+        new_events.append({
+            "disease": disease,
+            "country": country,
+            "region": region,
             "title": title,
-            "url": link,
-            "date": (a.get("seendate") or "").replace("T"," ").replace("Z",""),
+            "link": link,
         })
 
-        if len(new_items) >= MAX_ITEMS:
+        if len(new_events) >= MAX_ITEMS:
             break
 
-    if not new_items:
+    if not new_events:
         tg_send(
-            "📄 تقرير رصد الأمراض الحيوانية (أخبار عالمية)\n"
+            "📄 تقرير رصد الأمراض الحيوانية (أخبار Google)\n"
             f"🕒 {now_ksa_str()}\n"
             "════════════════════\n"
-            f"✅ لا توجد أخبار جديدة مطابقة ضمن آخر {TIMESPAN}.\n"
+            "✅ لا توجد أخبار جديدة مطابقة للدول/الأمراض المحددة.\n"
             "🟢 الحالة التشغيلية: مستقر"
         )
         save_state(state)
         return
 
     lines = [
-        "📄 تقرير رصد الأمراض الحيوانية (أخبار عالمية)",
+        "📄 تقرير رصد الأمراض الحيوانية (أخبار Google)",
         f"🕒 {now_ksa_str()}",
         "════════════════════",
-        f"عدد الإشارات الجديدة: {len(new_items)}",
+        f"عدد الإشارات الجديدة: {len(new_events)}",
         "════════════════════",
     ]
-
-    for i, x in enumerate(new_items, 1):
+    for i, e in enumerate(new_events, 1):
         lines.append(
-            f"{i}) 🐾 {x['disease']}\n"
-            f"   🌍 الدولة: {x['country']}\n"
-            f"   📍 المنطقة: {x['region']}\n"
-            f"   📰 العنوان: {x['title']}\n"
-            f"   🔗 الرابط: {x['url']}"
+            f"{i}) 🐾 {e['disease']}\n"
+            f"   🌍 الدولة: {e['country']}\n"
+            f"   📍 المنطقة: {e['region']}\n"
+            f"   📰 العنوان: {e['title']}\n"
+            f"   🔗 الرابط: {e['link']}"
         )
 
     tg_send("\n".join(lines))
