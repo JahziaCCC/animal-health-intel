@@ -1,6 +1,5 @@
 import os, re, json, hashlib, datetime
 import requests
-import xml.etree.ElementTree as ET
 
 BOT = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -9,12 +8,11 @@ KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "state.json"
 
 # ===== إعدادات =====
-MAX_ITEMS_PER_RUN = 15
+TIMESPAN = "12h"         # آخر 12 ساعة (تقدر تخليها 1d)
+MAX_ITEMS = 12           # كم خبر بالتقرير
 
-# الدول تحت المراقبة (بالإنجليزي كما تظهر في النص غالباً)
 COUNTRY_KEYS = {
     "saudi arabia": "المملكة العربية السعودية",
-    "ksa": "المملكة العربية السعودية",
     "sudan": "السودان",
     "somalia": "الصومال",
     "ethiopia": "إثيوبيا",
@@ -22,20 +20,22 @@ COUNTRY_KEYS = {
     "jordan": "الأردن",
 }
 
-# الأمراض (كلمات مفتاحية)
+# كلمات للأمراض الحيوانية (إنجليزي لأن الأخبار غالباً كذا)
 DISEASE_KEYS = {
-    "ppr": "طاعون المجترات الصغيرة (PPR)",
     "peste des petits ruminants": "طاعون المجترات الصغيرة (PPR)",
-    "rift valley": "حمّى الوادي المتصدع (RVF)",
-    "rvf": "حمّى الوادي المتصدع (RVF)",
+    "ppr": "طاعون المجترات الصغيرة (PPR)",
+    "rift valley": "حمّى الوادي المتصدّع (RVF)",
+    "rvf": "حمّى الوادي المتصدّع (RVF)",
     "foot and mouth": "الحمّى القلاعية (FMD)",
     "fmd": "الحمّى القلاعية (FMD)",
     "avian influenza": "إنفلونزا الطيور",
     "h5n1": "إنفلونزا الطيور (H5N1)",
     "lumpy skin": "مرض الجلد العقدي (LSD)",
+    "anthrax": "الجمرة الخبيثة",
+    "rabies": "داء الكلب",
 }
 
-# قاموس مناطق (قابل للتوسعة) + تعريب تلقائي fallback
+# مناطق (قاموس + fallback)
 REGION_AR = {
     # KSA
     "riyadh": "الرياض",
@@ -54,6 +54,9 @@ REGION_AR = {
     # Sudan
     "khartoum": "الخرطوم",
     "darfur": "دارفور",
+    "north darfur": "شمال دارفور",
+    "central darfur": "وسط دارفور",
+    "south darfur": "جنوب دارفور",
     "kassala": "كسلا",
     "gedaref": "القضارف",
     "gezira": "الجزيرة",
@@ -81,11 +84,6 @@ REGION_AR = {
     "aqaba": "العقبة",
 }
 
-# مصدر RSS (تنبيه: إذا تغير المصدر نبدله بسهولة)
-RSS_URLS = [
-    "https://promedmail.org/rss/",  # RSS عام
-]
-
 def now_ksa_str():
     return datetime.datetime.now(tz=KSA_TZ).strftime("%Y-%m-%d %H:%M") + " بتوقيت السعودية"
 
@@ -95,137 +93,143 @@ def tg_send(text: str):
     r.raise_for_status()
 
 def load_state():
-    if not os.path.exists(STATE_FILE):
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
         return {"seen": {}}
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-def sid_from(link: str, title: str) -> str:
-    raw = (link or "") + "|" + (title or "")
+def sid(url: str, title: str):
+    raw = (url or "") + "|" + (title or "")
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
-def arabize_simple(text: str) -> str:
-    if not text:
-        return "-"
-    t = text.strip()
-    if re.search(r"[\u0600-\u06FF]", t):
-        return t
-    # تعريب خفيف جداً
-    rep = [
-        ("-"," "), ("_"," "),
-    ]
-    for a,b in rep:
-        t = t.replace(a,b)
-    # لو كلمة/منطقة موجودة في القاموس
-    key = t.lower()
-    if key in REGION_AR:
-        return REGION_AR[key]
-    return t  # fallback: نتركها كما هي بدل تهجئة غريبة
-
-def detect_country(text: str) -> str | None:
+def detect_country(text: str):
     low = (text or "").lower()
     for k, ar in COUNTRY_KEYS.items():
         if k in low:
             return ar
     return None
 
-def detect_disease(text: str) -> str | None:
+def detect_disease(text: str):
     low = (text or "").lower()
     for k, ar in DISEASE_KEYS.items():
         if k in low:
             return ar
     return None
 
-def detect_region(text: str) -> str:
+def extract_region(text: str):
+    """
+    يحاول يلقط منطقة من العنوان مثل (CENTRAL DARFUR) أو كلمات داخل النص.
+    """
     low = (text or "").lower()
+
+    # 1) أي شيء بين أقواس
+    m = re.findall(r"\(([^)]+)\)", text or "")
+    candidates = [c.strip() for c in m if c.strip()]
+
+    # 2) أو حاول يطابق من القاموس مباشرة من النص
     for k, ar in REGION_AR.items():
         if k in low:
             return ar
+
+    # 3) لو فيه أقواس جرّب ترجمتها
+    for c in candidates:
+        key = c.lower().strip()
+        if key in REGION_AR:
+            return REGION_AR[key]
+
     return "غير محدد"
 
-def fetch_rss_items():
-    items = []
-    for url in RSS_URLS:
-        r = requests.get(url, timeout=60)
-        r.raise_for_status()
-        root = ET.fromstring(r.text)
+def gdelt_query_url():
+    # نص بحث: أمراض + مواشي + دولك
+    diseases = "(" + " OR ".join([f'"{k}"' for k in ["ppr","rift valley","foot and mouth","avian influenza","lumpy skin","anthrax","rabies"]]) + ")"
+    animals = '("livestock" OR cattle OR sheep OR goat OR camels OR poultry OR "animal disease")'
+    countries = "(" + " OR ".join([f'"{c}"' for c in ["Saudi Arabia","Sudan","Somalia","Ethiopia","Djibouti","Jordan"]]) + ")"
+    q = f"{diseases} AND {animals} AND {countries}"
 
-        # RSS structure: channel/item
-        for it in root.findall(".//item"):
-            title = (it.findtext("title") or "").strip()
-            link = (it.findtext("link") or "").strip()
-            pub = (it.findtext("pubDate") or "").strip()
-            desc = (it.findtext("description") or "").strip()
-            items.append({"title": title, "link": link, "pubDate": pub, "desc": desc})
-    return items
+    # GDELT DOC API
+    return (
+        "https://api.gdeltproject.org/api/v2/doc/doc"
+        f"?query={requests.utils.quote(q)}"
+        f"&mode=artlist&format=json&sort=datedesc&maxrecords=250&timespan={TIMESPAN}"
+    )
 
 def main():
     state = load_state()
 
     try:
-        items = fetch_rss_items()
+        url = gdelt_query_url()
+        r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0 (compatible; KSA-Animal-Health-Monitor/1.0)"})
+        r.raise_for_status()
+        data = r.json()
     except Exception as e:
-        tg_send(f"⚠️ تعذر جلب RSS حالياً.\n🕒 {now_ksa_str()}\nتفاصيل مختصرة: {type(e).__name__}")
+        tg_send(f"⚠️ تعذر جلب الأخبار حالياً.\n🕒 {now_ksa_str()}\nالسبب: {type(e).__name__}")
         return
 
-    new_events = []
-    for it in items:
-        title = it["title"]
-        blob = f"{it['title']} {it['desc']}"
-        country = detect_country(blob)
-        disease = detect_disease(blob)
+    arts = data.get("articles", []) or []
+    new_items = []
 
-        if not country or not disease:
+    for a in arts:
+        title = (a.get("title") or "").strip()
+        link = (a.get("url") or "").strip()
+        if not title or not link:
             continue
 
-        region = detect_region(blob)
-        sid = sid_from(it["link"], title)
-        if sid in state["seen"]:
+        blob = f"{title} {a.get('sourceCountry','')} {a.get('domain','')}"
+        country_ar = detect_country(blob)
+        disease_ar = detect_disease(blob)
+        if not country_ar or not disease_ar:
             continue
 
-        state["seen"][sid] = {"first_seen": now_ksa_str()}
-        new_events.append({
-            "country": country,
-            "region": region,
-            "disease": disease,
+        region_ar = extract_region(title)
+
+        k = sid(link, title)
+        if k in state["seen"]:
+            continue
+
+        state["seen"][k] = {"first_seen": now_ksa_str()}
+        new_items.append({
+            "disease": disease_ar,
+            "country": country_ar,
+            "region": region_ar,
             "title": title,
-            "link": it["link"],
-            "pubDate": it["pubDate"],
+            "url": link,
+            "date": (a.get("seendate") or "").replace("T"," ").replace("Z",""),
         })
 
-        if len(new_events) >= MAX_ITEMS_PER_RUN:
+        if len(new_items) >= MAX_ITEMS:
             break
 
-    # تقرير عربي
-    if not new_events:
+    if not new_items:
         tg_send(
-            "📄 تقرير رصد الأمراض الحيوانية (RSS)\n"
+            "📄 تقرير رصد الأمراض الحيوانية (أخبار عالمية)\n"
             f"🕒 {now_ksa_str()}\n"
             "════════════════════\n"
-            "✅ لا توجد أحداث جديدة مطابقة للدول/الأمراض المحددة.\n"
+            f"✅ لا توجد أخبار جديدة مطابقة ضمن آخر {TIMESPAN}.\n"
             "🟢 الحالة التشغيلية: مستقر"
         )
         save_state(state)
         return
 
     lines = [
-        "📄 تقرير رصد الأمراض الحيوانية (RSS)",
+        "📄 تقرير رصد الأمراض الحيوانية (أخبار عالمية)",
         f"🕒 {now_ksa_str()}",
         "════════════════════",
-        f"عدد الأحداث الجديدة: {len(new_events)}",
+        f"عدد الإشارات الجديدة: {len(new_items)}",
         "════════════════════",
     ]
-    for i, e in enumerate(new_events, 1):
+
+    for i, x in enumerate(new_items, 1):
         lines.append(
-            f"{i}) 🐾 {e['disease']}\n"
-            f"   🌍 الدولة: {e['country']}\n"
-            f"   📍 المنطقة: {e['region']}\n"
-            f"   📰 العنوان: {e['title']}\n"
-            f"   🔗 المصدر: {e['link']}"
+            f"{i}) 🐾 {x['disease']}\n"
+            f"   🌍 الدولة: {x['country']}\n"
+            f"   📍 المنطقة: {x['region']}\n"
+            f"   📰 العنوان: {x['title']}\n"
+            f"   🔗 الرابط: {x['url']}"
         )
 
     tg_send("\n".join(lines))
