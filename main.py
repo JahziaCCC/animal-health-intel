@@ -1,4 +1,8 @@
-import os, re, json, hashlib, datetime
+import os
+import re
+import json
+import hashlib
+import datetime
 import requests
 import xml.etree.ElementTree as ET
 
@@ -9,7 +13,8 @@ KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "state.json"
 
 # ===== إعدادات =====
-MAX_ITEMS = 12
+MAX_ITEMS = 8
+MAX_AGE_DAYS = 30   # استبعاد الأخبار القديمة
 
 COUNTRY_KEYS = {
     "saudi arabia": "المملكة العربية السعودية",
@@ -47,7 +52,6 @@ REGION_AR = {
     "najran": "نجران",
     "khartoum": "الخرطوم",
     "darfur": "دارفور",
-    "banadir": "بنادر",
     "oromia": "أوروميا",
     "amhara": "أمهرا",
     "addis ababa": "أديس أبابا",
@@ -57,86 +61,113 @@ REGION_AR = {
 
 GOOGLE_RSS = "https://news.google.com/rss/search?q={q}&hl=en&gl=US&ceid=US:en"
 
-def now_ksa_str():
-    return datetime.datetime.now(tz=KSA_TZ).strftime("%Y-%m-%d %H:%M") + " بتوقيت السعودية"
 
-# ===== حل مشكلة طول الرسالة =====
+# ===== أدوات =====
+def now_ksa():
+    return datetime.datetime.now(tz=KSA_TZ)
+
+def now_ksa_str():
+    return now_ksa().strftime("%Y-%m-%d %H:%M") + " بتوقيت السعودية"
+
+
+# ===== Telegram (مع تقسيم الرسائل) =====
 def tg_send(text: str):
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
 
-    chunks = [text[i:i+3500] for i in range(0, len(text), 3500)]
+    parts = [text[i:i+3500] for i in range(0, len(text), 3500)]
 
-    for part in chunks:
+    for p in parts:
         r = requests.post(
             url,
             json={
                 "chat_id": CHAT_ID,
-                "text": part,
+                "text": p,
                 "disable_web_page_preview": True
             },
             timeout=30
         )
         r.raise_for_status()
 
+
+# ===== State =====
 def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except:
         return {"seen": {}}
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-def make_sid(url: str, title: str) -> str:
+def make_sid(url, title):
     raw = (url or "") + "|" + (title or "")
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-def detect_country(text: str):
-    low = (text or "").lower()
-    for k, ar in COUNTRY_KEYS.items():
+
+# ===== كشف البيانات =====
+def detect_country(text):
+    low = text.lower()
+    for k, v in COUNTRY_KEYS.items():
         if k in low:
-            return ar
+            return v
     return None
 
-def detect_disease(text: str):
-    low = (text or "").lower()
-    for k, ar in DISEASE_KEYS.items():
+def detect_disease(text):
+    low = text.lower()
+    for k, v in DISEASE_KEYS.items():
         if k in low:
-            return ar
+            return v
     return None
 
-def detect_region(text: str):
-    low = (text or "").lower()
-    for k, ar in REGION_AR.items():
+def detect_region(text):
+    low = text.lower()
+    for k, v in REGION_AR.items():
         if k in low:
-            return ar
+            return v
     return "غير محدد"
 
-def fetch_google_rss(query: str):
+
+# ===== جلب RSS =====
+def fetch_google_rss(query):
     url = GOOGLE_RSS.format(q=requests.utils.quote(query))
     headers = {"User-Agent": "Mozilla/5.0"}
+
     r = requests.get(url, timeout=45, headers=headers)
     r.raise_for_status()
 
     root = ET.fromstring(r.text)
-    items = []
 
+    items = []
     for it in root.findall(".//item"):
         items.append({
             "title": (it.findtext("title") or "").strip(),
             "link": (it.findtext("link") or "").strip(),
+            "pub": (it.findtext("pubDate") or "").strip(),
             "desc": (it.findtext("description") or "").strip(),
         })
-
     return items
 
+
+# ===== فلتر التاريخ =====
+def is_recent(pubdate):
+    try:
+        dt = datetime.datetime.strptime(pubdate, "%a, %d %b %Y %H:%M:%S %Z")
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+        age = now_ksa() - dt.astimezone(KSA_TZ)
+        return age.days <= MAX_AGE_DAYS
+    except:
+        return True
+
+
+# ===== MAIN =====
 def main():
+
     state = load_state()
 
     queries = [
-        '("PPR" OR "rift valley fever" OR "foot and mouth disease" OR "avian influenza" OR "lumpy skin disease") (livestock OR sheep OR goats) (Saudi Arabia OR Sudan OR Somalia OR Ethiopia OR Djibouti OR Jordan)'
+        '("PPR" OR "rift valley fever" OR "foot and mouth disease" OR "avian influenza" OR "lumpy skin disease") (livestock OR sheep OR goats OR cattle) (Saudi Arabia OR Sudan OR Somalia OR Ethiopia OR Djibouti OR Jordan)'
     ]
 
     all_items = []
@@ -145,12 +176,20 @@ def main():
         for q in queries:
             all_items.extend(fetch_google_rss(q))
     except Exception as e:
-        tg_send(f"⚠️ تعذر جلب الأخبار حالياً.\n🕒 {now_ksa_str()}\nالسبب: {type(e).__name__}")
+        tg_send(
+            "⚠️ تعذر جلب الأخبار حالياً.\n"
+            f"🕒 {now_ksa_str()}\n"
+            f"السبب: {type(e).__name__}"
+        )
         return
 
     new_events = []
 
     for it in all_items:
+
+        if not is_recent(it["pub"]):
+            continue
+
         blob = f"{it['title']} {it['desc']}"
 
         country = detect_country(blob)
@@ -178,12 +217,13 @@ def main():
         if len(new_events) >= MAX_ITEMS:
             break
 
+    # ===== تقرير =====
     if not new_events:
         tg_send(
             "📄 تقرير رصد الأمراض الحيوانية (Google News)\n"
             f"🕒 {now_ksa_str()}\n"
             "════════════════════\n"
-            "✅ لا توجد أخبار جديدة حالياً.\n"
+            "✅ لا توجد أخبار جديدة حديثة.\n"
             "🟢 الحالة التشغيلية: مستقر"
         )
         save_state(state)
@@ -208,6 +248,7 @@ def main():
 
     tg_send("\n".join(lines))
     save_state(state)
+
 
 if __name__ == "__main__":
     main()
