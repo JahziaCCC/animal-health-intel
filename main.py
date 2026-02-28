@@ -13,10 +13,9 @@ KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "state.json"
 
 # ===== إعدادات =====
-MAX_ITEMS = 8
-MAX_AGE_DAYS = 120  # خليها 90-180 حسب رغبتك
+MAX_ITEMS = 10
+MAX_AGE_DAYS = 120  # 90-180 مناسب
 
-# دول تحت المراقبة (تقدر تزيد)
 COUNTRY_KEYS = {
     "saudi arabia": "المملكة العربية السعودية",
     "kingdom of saudi arabia": "المملكة العربية السعودية",
@@ -27,12 +26,8 @@ COUNTRY_KEYS = {
     "djibouti": "جيبوتي",
     "jordan": "الأردن",
     "india": "الهند",
-    "pakistan": "باكستان",
-    "australia": "أستراليا",
-    "brazil": "البرازيل",
 }
 
-# أمراضك (أسماء كاملة + اختصار بشرط سياق)
 DISEASE_FULL = {
     "rift valley fever": "حمّى الوادي المتصدّع (RVF)",
     "peste des petits ruminants": "طاعون المجترات الصغيرة (PPR)",
@@ -67,9 +62,6 @@ REGION_AR = {
     "hail": "حائل",
     "jazan": "جازان",
     "najran": "نجران",
-    "al bahah": "الباحة",
-    "al jawf": "الجوف",
-    "northern borders": "الحدود الشمالية",
     "khartoum": "الخرطوم",
     "darfur": "دارفور",
     "oromia": "أوروميا",
@@ -81,8 +73,8 @@ REGION_AR = {
 
 # مصادر
 PROMED_RSS = "https://promedmail.org/promed-posts?format=rss"
-GOOGLE_RSS = "https://news.google.com/rss/search?q={q}&hl=en&gl=US&ceid=US:en"
 GDELT_DOC = "https://api.gdeltproject.org/api/v2/doc/doc"
+GOOGLE_RSS = "https://news.google.com/rss/search?q={q}&hl=en&gl=US&ceid=US:en"
 
 
 # ===== وقت =====
@@ -120,7 +112,7 @@ def save_state(state):
 
 def make_sid(url, title):
     raw = (url or "") + "|" + (title or "")
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return hashlib.sha256(raw.encode()).hexdigest()[:16}
 
 
 # ===== كشف =====
@@ -141,12 +133,10 @@ def detect_region(text, country_ar):
 def detect_disease(text):
     low = (text or "").lower()
 
-    # 1) أسماء كاملة
     for k, v in DISEASE_FULL.items():
         if k in low:
             return v
 
-    # 2) اختصار بشرط سياق
     has_context = any(c in low for c in DISEASE_CONTEXT)
     if has_context:
         for k, v in DISEASE_ABBR.items():
@@ -166,27 +156,24 @@ def classify_item(title: str, desc: str) -> str:
     return "🟨 خبر عام"
 
 
-# ===== فلترة العمر (لـ GDELT/Google) =====
-def within_days(iso_or_pubdate: str, days: int) -> bool:
-    if not iso_or_pubdate:
+# ===== فلترة العمر =====
+def within_days(pub: str, days: int) -> bool:
+    if not pub:
         return True
-    # GDELT ISO: 2026-02-28T00:00:00Z
     try:
-        if "T" in iso_or_pubdate and iso_or_pubdate.endswith("Z"):
-            dt = datetime.datetime.strptime(iso_or_pubdate, "%Y-%m-%dT%H:%M:%SZ")
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        # GDELT ISO: 2026-02-28T00:00:00Z
+        if "T" in pub and pub.endswith("Z"):
+            dt = datetime.datetime.strptime(pub, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
         else:
-            # Google pubDate: Sat, 28 Feb 2026 00:00:00 GMT
-            dt = datetime.datetime.strptime(iso_or_pubdate, "%a, %d %b %Y %H:%M:%S %Z")
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
-
+            # Google: Sat, 28 Feb 2026 00:00:00 GMT
+            dt = datetime.datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %Z").replace(tzinfo=datetime.timezone.utc)
         age = now_ksa() - dt.astimezone(KSA_TZ)
         return age.days <= days
     except:
         return True
 
 
-# ===== جلب ProMED RSS =====
+# ===== جلب ProMED (قد يفشل) =====
 def fetch_promed():
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(PROMED_RSS, timeout=45, headers=headers)
@@ -205,7 +192,7 @@ def fetch_promed():
     return items
 
 
-# ===== جلب Google News RSS =====
+# ===== جلب Google News (fallback مضمون غالباً) =====
 def fetch_google(query):
     url = GOOGLE_RSS.format(q=requests.utils.quote(query))
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -225,21 +212,30 @@ def fetch_google(query):
     return items
 
 
-# ===== جلب GDELT =====
-def fetch_gdelt(query, maxrecords=50):
+# ===== جلب GDELT (مصمم ضد JSONDecodeError) =====
+def fetch_gdelt(query, maxrecords=60):
     params = {
         "query": query,
-        "mode": "ArtList",
+        "mode": "artlist",
         "format": "json",
-        "sort": "HybridRel",
+        "sort": "datedesc",
         "maxrecords": str(maxrecords),
-        "formatting": "json",
     }
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (KSA-Animal-Health-Intel/1.0)"}
     r = requests.get(GDELT_DOC, params=params, timeout=45, headers=headers)
-    r.raise_for_status()
-    data = r.json()
 
+    # إذا GDELT رجّع HTML (حجب/Rate limit) بدال JSON
+    ctype = (r.headers.get("content-type") or "").lower()
+    text = (r.text or "").strip()
+
+    if r.status_code != 200:
+        raise requests.HTTPError(f"GDELT HTTP {r.status_code}", response=r)
+
+    if "application/json" not in ctype and not text.startswith("{"):
+        # هذا سبب JSONDecodeError عندك — نعطي خطأ مفهوم
+        raise ValueError("GDELT returned non-JSON (likely rate-limit/block)")
+
+    data = r.json()
     items = []
     for a in data.get("articles", []) or []:
         items.append({
@@ -247,7 +243,7 @@ def fetch_gdelt(query, maxrecords=50):
             "title": (a.get("title") or "").strip(),
             "link": (a.get("url") or "").strip(),
             "pub": (a.get("seendate") or "").strip(),  # ISO Z
-            "desc": (a.get("sourceCountry") or "") + " " + (a.get("snippet") or ""),
+            "desc": (a.get("snippet") or "") + " " + (a.get("sourceCountry") or ""),
         })
     return items
 
@@ -255,56 +251,56 @@ def fetch_gdelt(query, maxrecords=50):
 def main():
     state = load_state()
 
-    # استعلام واسع لكن “ذكي” داخل الكود هو اللي يفلتر
     countries_q = "(Saudi Arabia OR Sudan OR Somalia OR Ethiopia OR Djibouti OR Jordan OR India)"
-    diseases_q = '("rift valley fever" OR RVF OR "peste des petits ruminants" OR PPR OR "foot and mouth disease" OR FMD OR "avian influenza" OR H5N1 OR "lumpy skin disease")'
-    context_q = "(outbreak OR cases OR virus OR fever OR confirmed OR detected OR surveillance OR vaccination)"
+    diseases_q = '("rift valley fever" OR RVF OR "peste des petits ruminants" OR PPR OR "foot and mouth disease" OR FMD OR "avian influenza" OR H5N1 OR "lumpy skin disease" OR anthrax OR rabies)'
 
-    google_query = f"{diseases_q} {context_q} {countries_q}"
-    gdelt_query = f'{diseases_q} {context_q} {countries_q}'
+    # استعلامات بسيطة تقلل “صفر”
+    google_query = f"{diseases_q} {countries_q}"
+    gdelt_query = f"{diseases_q} {countries_q}"
 
-    all_items = []
-    errors = []
+    items = []
+    status_notes = []
 
-    # 1) ProMED
+    # 1) ProMED (لو اشتغل ممتاز، لو فشل ما يوقف)
     try:
-        all_items.extend(fetch_promed())
+        items.extend(fetch_promed())
+        status_notes.append("ProMED=OK")
     except Exception as e:
-        errors.append(f"ProMED={type(e).__name__}")
+        status_notes.append(f"ProMED={type(e).__name__}")
 
-    # 2) GDELT
+    # 2) GDELT (لو رجع غير JSON ما ننهار)
     try:
-        all_items.extend(fetch_gdelt(gdelt_query, maxrecords=60))
+        items.extend(fetch_gdelt(gdelt_query, maxrecords=80))
+        status_notes.append("GDELT=OK")
     except Exception as e:
-        errors.append(f"GDELT={type(e).__name__}")
+        status_notes.append(f"GDELT={type(e).__name__}")
 
-    # 3) Google News (fallback)
+    # 3) Google fallback
     try:
-        all_items.extend(fetch_google(google_query))
+        items.extend(fetch_google(google_query))
+        status_notes.append("Google=OK")
     except Exception as e:
-        errors.append(f"Google={type(e).__name__}")
+        status_notes.append(f"Google={type(e).__name__}")
 
-    # لو كلهم فشلوا
-    if not all_items:
+    if not items:
         tg_send(
-            "⚠️ تعذر جلب المصادر حالياً.\n"
+            "⚠️ تعذر جلب أي مصدر حالياً.\n"
             f"🕒 {now_ksa_str()}\n"
-            f"تفاصيل: {', '.join(errors) if errors else 'غير معروف'}"
+            f"حالة المصادر: {'؛ '.join(status_notes)}"
         )
         return
 
     new_events = []
-
-    for it in all_items:
-        # فلتر العمر (لـ Google/GDELT – ProMED أحياناً بدون pubDate واضح)
+    for it in items:
+        # فلترة عمر (للـ Google/GDELT)
         if it["source"] in ("Google News", "GDELT"):
             if not within_days(it.get("pub", ""), MAX_AGE_DAYS):
                 continue
 
         blob = f"{it.get('title','')} {it.get('desc','')}"
-        country = detect_country(blob)
         disease = detect_disease(blob)
-        if not country or not disease:
+        country = detect_country(blob)
+        if not disease or not country:
             continue
 
         region = detect_region(blob, country)
@@ -317,10 +313,10 @@ def main():
 
         new_events.append({
             "source": it["source"],
-            "country": country,
-            "disease": disease,
-            "region": region,
             "label": label,
+            "disease": disease,
+            "country": country,
+            "region": region,
             "title": it.get("title",""),
             "link": it.get("link",""),
         })
@@ -330,21 +326,21 @@ def main():
 
     if not new_events:
         tg_send(
-            "📄 تقرير رصد الأمراض الحيوانية (مصادر عالمية متعددة)\n"
+            "📄 تقرير رصد الأمراض الحيوانية (مصادر متعددة)\n"
             f"🕒 {now_ksa_str()}\n"
             "════════════════════\n"
             "✅ لا توجد إشارات جديدة مطابقة حالياً.\n"
-            f"ℹ️ حالة المصادر: {('✅' if not errors else '؛ '.join(errors))}"
+            f"ℹ️ حالة المصادر: {'؛ '.join(status_notes)}"
         )
         save_state(state)
         return
 
     lines = [
-        "📄 تقرير رصد الأمراض الحيوانية (مصادر عالمية متعددة)",
+        "📄 تقرير رصد الأمراض الحيوانية (مصادر متعددة)",
         f"🕒 {now_ksa_str()}",
         "════════════════════",
         f"عدد الإشارات الجديدة: {len(new_events)}",
-        f"ℹ️ حالة المصادر: {('✅' if not errors else '؛ '.join(errors))}",
+        f"ℹ️ حالة المصادر: {'؛ '.join(status_notes)}",
         "════════════════════",
     ]
 
