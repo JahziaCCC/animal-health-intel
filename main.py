@@ -18,23 +18,27 @@ MAX_AGE_DAYS = 90
 
 COUNTRY_KEYS = {
     "saudi arabia": "المملكة العربية السعودية",
+    "kingdom of saudi arabia": "المملكة العربية السعودية",
+    "ksa": "المملكة العربية السعودية",
     "sudan": "السودان",
     "somalia": "الصومال",
     "ethiopia": "إثيوبيا",
     "djibouti": "جيبوتي",
     "jordan": "الأردن",
+    "india": "الهند",
+    "pakistan": "باكستان",
+    "australia": "أستراليا",
+    "brazil": "البرازيل",
 }
 
-DISEASE_KEYS = {
+# ✅ مهم: حذف الاختصارات الحساسة (RVF/FMD/PPR لوحدها) لأنها تسبب False Positive
+DISEASE_KEYS_STRICT = {
     "peste des petits ruminants": "طاعون المجترات الصغيرة (PPR)",
-    "ppr": "طاعون المجترات الصغيرة (PPR)",
-    "rift valley": "حمّى الوادي المتصدّع (RVF)",
-    "rvf": "حمّى الوادي المتصدّع (RVF)",
-    "foot and mouth": "الحمّى القلاعية (FMD)",
-    "fmd": "الحمّى القلاعية (FMD)",
+    "rift valley fever": "حمّى الوادي المتصدّع (RVF)",
+    "foot and mouth disease": "الحمّى القلاعية (FMD)",
     "avian influenza": "إنفلونزا الطيور",
-    "h5n1": "إنفلونزا الطيور (H5N1)",
-    "lumpy skin": "مرض الجلد العقدي (LSD)",
+    "highly pathogenic avian influenza": "إنفلونزا الطيور عالية الإمراض (HPAI)",
+    "lumpy skin disease": "مرض الجلد العقدي (LSD)",
     "anthrax": "الجمرة الخبيثة",
     "rabies": "داء الكلب",
 }
@@ -50,6 +54,9 @@ REGION_AR = {
     "hail": "حائل",
     "jazan": "جازان",
     "najran": "نجران",
+    "al bahah": "الباحة",
+    "al jawf": "الجوف",
+    "northern borders": "الحدود الشمالية",
     "khartoum": "الخرطوم",
     "darfur": "دارفور",
     "oromia": "أوروميا",
@@ -61,6 +68,7 @@ REGION_AR = {
 
 GOOGLE_RSS = "https://news.google.com/rss/search?q={q}&hl=en&gl=US&ceid=US:en"
 
+
 # ===== وقت =====
 def now_ksa():
     return datetime.datetime.now(tz=KSA_TZ)
@@ -68,12 +76,11 @@ def now_ksa():
 def now_ksa_str():
     return now_ksa().strftime("%Y-%m-%d %H:%M") + " بتوقيت السعودية"
 
+
 # ===== Telegram =====
 def tg_send(text: str):
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
-
     parts = [text[i:i+3500] for i in range(0, len(text), 3500)]
-
     for p in parts:
         r = requests.post(
             url,
@@ -85,6 +92,7 @@ def tg_send(text: str):
             timeout=30
         )
         r.raise_for_status()
+
 
 # ===== State =====
 def load_state():
@@ -102,36 +110,55 @@ def make_sid(url, title):
     raw = (url or "") + "|" + (title or "")
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
+
 # ===== كشف =====
 def detect_country(text):
-    low = text.lower()
+    low = (text or "").lower()
     for k, v in COUNTRY_KEYS.items():
         if k in low:
             return v
     return None
 
-def detect_disease(text):
-    low = text.lower()
-    for k, v in DISEASE_KEYS.items():
-        if k in low:
-            return v
-    return None
-
 def detect_region(text):
-    low = text.lower()
+    low = (text or "").lower()
     for k, v in REGION_AR.items():
         if k in low:
             return v
     return "غير محدد"
 
+def detect_disease_strict(text):
+    low = (text or "").lower()
+    for k, v in DISEASE_KEYS_STRICT.items():
+        if k in low:
+            return v
+    return None
+
+def classify_item(title: str, desc: str) -> str:
+    low = f"{title} {desc}".lower()
+    if "outbreak" in low or "confirmed" in low or "cases" in low:
+        return "🟥 تفشي/حالات"
+    if "ban" in low or "imports" in low or "import ban" in low:
+        return "🟦 قرار/منع استيراد"
+    if "study" in low or "investigation" in low or "characterization" in low:
+        return "🟩 دراسة/بحث"
+    return "🟨 خبر عام"
+
+def is_recent(pubdate):
+    try:
+        dt = datetime.datetime.strptime(pubdate, "%a, %d %b %Y %H:%M:%S %Z")
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+        age = now_ksa() - dt.astimezone(KSA_TZ)
+        return age.days <= MAX_AGE_DAYS
+    except:
+        return True
+
+
 # ===== RSS =====
 def fetch_google_rss(query):
     url = GOOGLE_RSS.format(q=requests.utils.quote(query))
     headers = {"User-Agent": "Mozilla/5.0"}
-
     r = requests.get(url, timeout=45, headers=headers)
     r.raise_for_status()
-
     root = ET.fromstring(r.text)
 
     items = []
@@ -144,27 +171,17 @@ def fetch_google_rss(query):
         })
     return items
 
-# ===== فلتر التاريخ =====
-def is_recent(pubdate):
-    try:
-        dt = datetime.datetime.strptime(pubdate, "%a, %d %b %Y %H:%M:%S %Z")
-        dt = dt.replace(tzinfo=datetime.timezone.utc)
-        age = now_ksa() - dt.astimezone(KSA_TZ)
-        return age.days <= MAX_AGE_DAYS
-    except:
-        return True
 
 # ===== MAIN =====
 def main():
-
     state = load_state()
 
+    # ✅ بحث “صارم” بأسماء الأمراض كاملة لتقليل الأخطاء
     queries = [
-        '("PPR" OR "peste des petits ruminants" OR "rift valley fever" OR "foot and mouth disease" OR "avian influenza" OR "lumpy skin disease" OR "animal disease outbreak") (Saudi Arabia OR Sudan OR Somalia OR Ethiopia OR Djibouti OR Jordan)'
+        '("rift valley fever" OR "peste des petits ruminants" OR "foot and mouth disease" OR "avian influenza" OR "lumpy skin disease" OR anthrax OR rabies) (Saudi Arabia OR Sudan OR Somalia OR Ethiopia OR Djibouti OR Jordan OR India)'
     ]
 
     all_items = []
-
     try:
         for q in queries:
             all_items.extend(fetch_google_rss(q))
@@ -179,30 +196,33 @@ def main():
     new_events = []
 
     for it in all_items:
-
         if not is_recent(it["pub"]):
             continue
 
         blob = f"{it['title']} {it['desc']}"
 
-        country = detect_country(blob)
-        disease = detect_disease(blob)
+        # مرض (صارم)
+        disease = detect_disease_strict(blob)
+        if not disease:
+            continue
 
-        if not country or not disease:
+        country = detect_country(blob)
+        if not country:
             continue
 
         region = detect_region(blob)
+        label = classify_item(it["title"], it["desc"])
 
         sid = make_sid(it["link"], it["title"])
         if sid in state["seen"]:
             continue
-
         state["seen"][sid] = {"first_seen": now_ksa_str()}
 
         new_events.append({
             "country": country,
             "disease": disease,
             "region": region,
+            "label": label,
             "title": it["title"],
             "link": it["link"]
         })
@@ -215,7 +235,7 @@ def main():
             "📄 تقرير رصد الأمراض الحيوانية (Google News)\n"
             f"🕒 {now_ksa_str()}\n"
             "════════════════════\n"
-            "✅ لا توجد أخبار جديدة حديثة.\n"
+            "✅ لا توجد أخبار جديدة حديثة مطابقة (فلترة صارمة).\n"
             "🟢 الحالة التشغيلية: مستقر"
         )
         save_state(state)
@@ -231,7 +251,7 @@ def main():
 
     for i, e in enumerate(new_events, 1):
         lines.append(
-            f"{i}) 🐾 {e['disease']}\n"
+            f"{i}) {e['label']}  🐾 {e['disease']}\n"
             f"   🌍 الدولة: {e['country']}\n"
             f"   📍 المنطقة: {e['region']}\n"
             f"   📰 العنوان: {e['title']}\n"
