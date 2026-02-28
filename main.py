@@ -112,7 +112,7 @@ def save_state(state):
 
 def make_sid(url, title):
     raw = (url or "") + "|" + (title or "")
-    return hashlib.sha256(raw.encode()).hexdigest()[:16}
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 # ===== كشف =====
