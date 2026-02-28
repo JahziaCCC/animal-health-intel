@@ -14,7 +14,7 @@ STATE_FILE = "state.json"
 
 # ===== إعدادات =====
 MAX_ITEMS = 8
-MAX_AGE_DAYS = 90   # استبعاد الأخبار القديمة
+MAX_AGE_DAYS = 90
 
 COUNTRY_KEYS = {
     "saudi arabia": "المملكة العربية السعودية",
@@ -61,16 +61,14 @@ REGION_AR = {
 
 GOOGLE_RSS = "https://news.google.com/rss/search?q={q}&hl=en&gl=US&ceid=US:en"
 
-
-# ===== أدوات =====
+# ===== وقت =====
 def now_ksa():
     return datetime.datetime.now(tz=KSA_TZ)
 
 def now_ksa_str():
     return now_ksa().strftime("%Y-%m-%d %H:%M") + " بتوقيت السعودية"
 
-
-# ===== Telegram (مع تقسيم الرسائل) =====
+# ===== Telegram =====
 def tg_send(text: str):
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
 
@@ -88,7 +86,6 @@ def tg_send(text: str):
         )
         r.raise_for_status()
 
-
 # ===== State =====
 def load_state():
     try:
@@ -105,8 +102,7 @@ def make_sid(url, title):
     raw = (url or "") + "|" + (title or "")
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-
-# ===== كشف البيانات =====
+# ===== كشف =====
 def detect_country(text):
     low = text.lower()
     for k, v in COUNTRY_KEYS.items():
@@ -128,8 +124,7 @@ def detect_region(text):
             return v
     return "غير محدد"
 
-
-# ===== جلب RSS =====
+# ===== RSS =====
 def fetch_google_rss(query):
     url = GOOGLE_RSS.format(q=requests.utils.quote(query))
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -149,7 +144,6 @@ def fetch_google_rss(query):
         })
     return items
 
-
 # ===== فلتر التاريخ =====
 def is_recent(pubdate):
     try:
@@ -160,14 +154,13 @@ def is_recent(pubdate):
     except:
         return True
 
-
 # ===== MAIN =====
 def main():
 
     state = load_state()
 
     queries = [
-        '("PPR" OR "rift valley fever" OR "foot and mouth disease" OR "avian influenza" OR "lumpy skin disease") (livestock OR sheep OR goats OR cattle) (Saudi Arabia OR Sudan OR Somalia OR Ethiopia OR Djibouti OR Jordan)'
+        '("PPR" OR "peste des petits ruminants" OR "rift valley fever" OR "foot and mouth disease" OR "avian influenza" OR "lumpy skin disease" OR "animal disease outbreak") (Saudi Arabia OR Sudan OR Somalia OR Ethiopia OR Djibouti OR Jordan)'
     ]
 
     all_items = []
@@ -217,7 +210,6 @@ def main():
         if len(new_events) >= MAX_ITEMS:
             break
 
-    # ===== تقرير =====
     if not new_events:
         tg_send(
             "📄 تقرير رصد الأمراض الحيوانية (Google News)\n"
@@ -248,7 +240,6 @@ def main():
 
     tg_send("\n".join(lines))
     save_state(state)
-
 
 if __name__ == "__main__":
     main()
