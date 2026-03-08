@@ -1,0 +1,36 @@
+name: Animal Health Monitor Arabic
+
+on:
+  schedule:
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: تحميل المستودع
+        uses: actions/checkout@v4
+
+      - name: استرجاع الحالة السابقة
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: animal-health-state-${{ github.run_id }}
+          restore-keys: |
+            animal-health-state-
+
+      - name: إعداد Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: تثبيت المكتبات
+        run: pip install requests
+
+      - name: تشغيل نظام الرصد العربي
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python animal_monitor_ar.py
